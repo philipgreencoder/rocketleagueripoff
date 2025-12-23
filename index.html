@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Car Soccer</title>
+<style>
+body { margin:0; overflow:hidden; background:black; }
+#hud {
+  position:fixed; top:10px; left:50%;
+  transform:translateX(-50%);
+  color:white; font-family:monospace;
+  font-size:18px;
+}
+</style>
+</head>
+<body>
+<div id="hud">0 : 0 | 300</div>
+
+<script type="module">
+import * as THREE from "https://cdn.skypack.dev/three";
+import * as CANNON from "https://cdn.skypack.dev/cannon-es";
+
+/* ================== BASIC SETUP ================== */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x101018);
+
+const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 500);
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+/* ================== PHYSICS ================== */
+const world = new CANNON.World();
+world.gravity.set(0,-30,0);
+world.broadphase = new CANNON.SAPBroadphase(world);
+
+/* ================== INPUT ================== */
+const keys = {};
+addEventListener("keydown", e=>keys[e.code]=true);
+addEventListener("keyup", e=>keys[e.code]=false);
+
+/* ================== ARENA ================== */
+const floorBody = new CANNON.Body({ mass:0, shape:new CANNON.Plane() });
+floorBody.quaternion.setFromEuler(-Math.PI/2,0,0);
+world.addBody(floorBody);
+
+const floorMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(120,80),
+  new THREE.MeshStandardMaterial({ color:0x1a7f3c })
+);
+floorMesh.rotation.x = -Math.PI/2;
+scene.add(floorMesh);
+
+const light = new THREE.DirectionalLight(0xffffff,1);
+light.position.set(20,50,20);
+scene.add(light);
+scene.add(new THREE.AmbientLight(0x404040));
+
+function wall(x,z,rx){
+  const body = new CANNON.Body({
+    mass:0,
+    shape:new CANNON.Box(new CANNON.Vec3(60,10,1)),
+    position:new CANNON.Vec3(x,10,z)
+  });
+  body.quaternion.setFromEuler(0,rx,0);
+  world.addBody(body);
+}
+wall(0,40,0); wall(0,-40,0);
+wall(60,0,Math.PI/2); wall(-60,0,Math.PI/2);
+
+/* ================== BALL ================== */
+const ballBody = new CANNON.Body({
+  mass:30,
+  shape:new CANNON.Sphere(1.2),
+  position:new CANNON.Vec3(0,5,0)
+});
+world.addBody(ballBody);
+
+const ballMesh = new THREE.Mesh(
+  new THREE.SphereGeometry(1.2,32,32),
+  new THREE.MeshStandardMaterial({ color:0xffffff })
+);
+scene.add(ballMesh);
+
+/* ================== CAR CLASS ================== */
+class Car {
+  constructor(color,pos){
+    this.body = new CANNON.Body({
+      mass:1500,
+      shape:new CANNON.Box(new CANNON.Vec3(1,0.5,2)),
+      position:pos.clone()
+    });
+    world.addBody(this.body);
+
+    this.mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(2,1,4),
+      new THREE.MeshStandardMaterial({ color })
+    );
+    scene.add(this.mesh);
+
+    this.boost = 100;
+    this.canDouble = true;
+  }
+
+  update(control){
+    const forward = this.body.quaternion.vmult(new CANNON.Vec3(0,0,-1));
+
+    if(control.throttle)
+      this.body.applyForce(forward.scale(8000));
+
+    if(control.boost && this.boost>0){
+      this.body.applyForce(forward.scale(16000));
+      this.boost -= 0.7;
+    }
+
+    if(control.jump && this.canDouble){
+      this.body.velocity.y = 14;
+      this.canDouble = false;
+    }
+
+    if(!this.canDouble){
+      this.body.angularVelocity.x += control.pitch*0.1;
+      this.body.angularVelocity.z += control.roll*0.1;
+      this.body.angularVelocity.y += control.yaw*0.1;
+    }
+
+    if(this.body.position.y<1.2)
+      this.canDouble = true;
+
+    this.mesh.position.copy(this.body.position);
+    this.mesh.quaternion.copy(this.body.quaternion);
+  }
+}
+
+/* ================== PLAYER & AI ================== */
+const player = new Car(0x00aaff,new CANNON.Vec3(0,2,20));
+const enemy = new Car(0xff4444,new CANNON.Vec3(0,2,-20));
+
+class AI {
+  constructor(car){ this.car=car; }
+  update(){
+    const dir = ballBody.position.vsub(this.car.body.position);
+    dir.y=0; dir.normalize();
+    this.car.body.applyForce(dir.scale(7000));
+    if(ballBody.position.y>3)
+      this.car.body.velocity.y=12;
+  }
+}
+const ai = new AI(enemy);
+
+/* ================== CAMERA ================== */
+function updateCamera(){
+  const target = player.mesh.position.clone().add(
+    new THREE.Vector3(0,6,12)
+      .applyQuaternion(player.mesh.quaternion)
+  );
+  camera.position.lerp(target,0.1);
+  camera.lookAt(player.mesh.position);
+}
+
+/* ================== GAME LOOP ================== */
+let time = 300;
+let last = performance.now();
+const hud = document.getElementById("hud");
+
+function loop(now){
+  requestAnimationFrame(loop);
+  world.step(1/60);
+
+  const dt = (now-last)/1000; last=now;
+  time -= dt;
+
+  player.update({
+    throttle: keys["KeyW"],
+    boost: keys["ShiftLeft"],
+    jump: keys["Space"],
+    pitch: (keys["ArrowUp"]?-1:0)+(keys["ArrowDown"]?1:0),
+    roll: (keys["ArrowLeft"]?-1:0)+(keys["ArrowRight"]?1:0),
+    yaw: (keys["KeyA"]?1:0)+(keys["KeyD"]?-1:0)
+  });
+
+  ai.update();
+
+  ballMesh.position.copy(ballBody.position);
+  updateCamera();
+
+  hud.textContent = `BOOST ${player.boost.toFixed(0)} | TIME ${Math.max(0,time).toFixed(0)}`;
+  renderer.render(scene,camera);
+}
+loop();
+</script>
+</body>
+</html>
